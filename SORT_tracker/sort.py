@@ -1,4 +1,11 @@
 import numpy as np
+
+import os
+import sys
+
+__dir__ = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(__dir__)
+sys.path.append(os.path.abspath(os.path.join(__dir__, '..')))
 from kalman_filter import KalmanFilterNew as KalmanFilter
 from association import associate_detections_to_trackers
 
@@ -91,7 +98,7 @@ class KalmanBoxTracker(object):
 
 
 class SORT(object):
-  def __init__(self, max_age=1, min_hits=3, iou_threshold=0.3):
+  def __init__(self, max_age=1, min_hits=3, iou_threshold=0.1):
     """
     Sets key parameters for SORT
     """

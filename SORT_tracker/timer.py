@@ -35,6 +35,3 @@ class Timer(object):
         self.diff = 0.
         self.average_time = 0.
         self.duration = 0.
-Footer
-© 2022 GitHub, Inc.
-Footer navigation

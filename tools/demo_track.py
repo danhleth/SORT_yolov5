@@ -2,22 +2,52 @@ import torch
 import numpy as np
 import cv2
 import time
-import os
 import argparse
 
+import sys
+import numpy as np
+from pathlib import Path
+import torch
+import torch.backends.cudnn as cudnn
+
+import os
+import sys
+
+__dir__ = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(__dir__)
+sys.path.append(os.path.abspath(os.path.join(__dir__, '..')))
+
 from loguru import logger
+import logging
 from SORT_tracker.sort import SORT
 from SORT_tracker.timer import Timer
-from yolov5.models.common import DetectMultiBackend as YoloV5
-from visualization import plot_tracking
+
+from yolov5.utils.dataloaders import VID_FORMATS, LoadImages, LoadStreams
+from yolov5.models.common import DetectMultiBackend
+from yolov5.utils.dataloaders import VID_FORMATS, LoadImages, LoadStreams
+from yolov5.utils.general import (LOGGER, check_img_size, non_max_suppression, scale_coords, check_requirements, cv2,
+                                  check_imshow, xyxy2xywh, increment_path, strip_optimizer, colorstr, print_args, check_file)
+from yolov5.utils.torch_utils import select_device, time_sync
+from yolov5.utils.plots import Annotator, colors, save_one_box
+from tools.visualization import plot_tracking
+
+from pathlib import Path
+
 
 class PredictorV5(object):
-    def __init__(self, model_path, conf):
-        self.model_path = model_path
-        self.model = YoloV5(self.model_path)
+    def __init__(self, yolo_weight, conf, args):
+        self.yolo_weight = yolo_weight
+        self.model = YoloV5(self.yolo_weight, args.device)
         self.conf = conf
+        self.args = args
 
     def inference(self, img, timer, frame_id):
+        img = cv2.resize(img, dsize=(640, 640), interpolation=cv2.INTER_CUBIC)
+        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+        img = np.ascontiguousarray(img)
+        img = torch.from_numpy(img).to(self.args.device)
+        img = img.float()
+        img /= 255.
         img_info = {"id": frame_id}
         if isinstance(img, str):
             img_info["file_name"] = os.path.basename(img)
@@ -32,6 +62,7 @@ class PredictorV5(object):
         img_info["ratio"] = .999999
         #img, ratio = preprocess_v5(img, self.test_size, self.rgb_means, self.std)
         self.model.conf = self.conf
+        
         results = self.model(img)
         timer.tic()
         predictions = results.pred[0]
@@ -44,186 +75,292 @@ class PredictorV5(object):
             outputs = [torch.cat((boxes_int, torch.unsqueeze(scores, dim=1)), 1)]
             return outputs, img_info, 
 
-def image_demo(predictor, vis_folder, current_time, args):
-    IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
-    def get_image_list(path):
-        image_names = []
-        for maindir, subdir, file_name_list in os.walk(path):
-            for filename in file_name_list:
-                apath = os.path.join(maindir, filename)
-                ext = os.path.splitext(apath)[1]
-                if ext in IMAGE_EXT:
-                    image_names.append(apath)
-        return image_names
+# limit the number of cpus used by high performance libraries
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-    if os.path.isdir(args.path):
-        files = get_image_list(args.path)
+
+
+FILE = Path(__file__).resolve()
+ROOT = FILE.parents[0]  # yolov5 sort root directory
+WEIGHTS = ROOT / 'weights'
+
+# if str(ROOT) not in sys.path:
+#     sys.path.append(str(ROOT))  # add ROOT to PATH
+# if str(ROOT / 'yolov5') not in sys.path:
+#     sys.path.append(str(ROOT / 'yolov5'))  # add yolov5 ROOT to PATH
+# if str(ROOT / 'strong_sort') not in sys.path:
+#     sys.path.append(str(ROOT / 'strong_sort'))  # add strong_sort ROOT to PATH
+# ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
+
+
+# remove duplicated stream handler to avoid duplicated logging
+logging.getLogger().removeHandler(logging.getLogger().handlers[0])
+
+@torch.no_grad()
+def run(
+        source='0',
+        yolo_weights=WEIGHTS / 'yolov5m.pt',  # model.pt path(s),
+        strong_sort_weights=WEIGHTS / 'osnet_x0_25_msmt17.pt',  # model.pt path,
+        config_strongsort=ROOT / 'strong_sort/configs/strong_sort.yaml',
+        imgsz=(640, 640),  # inference size (height, width)
+        conf_thres=0.25,  # confidence threshold
+        iou_thres=0.45,  # NMS IOU threshold
+        max_det=1000,  # maximum detections per image
+        device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
+        show_vid=False,  # show results
+        save_txt=False,  # save results to *.txt
+        save_conf=False,  # save confidences in --save-txt labels
+        save_crop=False,  # save cropped prediction boxes
+        save_vid=False,  # save confidences in --save-txt labels
+        nosave=False,  # do not save images/videos
+        classes=None,  # filter by class: --class 0, or --class 0 2 3
+        agnostic_nms=False,  # class-agnostic NMS
+        augment=False,  # augmented inference
+        visualize=False,  # visualize features
+        update=False,  # update all models
+        project=ROOT / 'runs/track',  # save results to project/name
+        name='exp',  # save results to project/name
+        exist_ok=False,  # existing project/name ok, do not increment
+        line_thickness=3,  # bounding box thickness (pixels)
+        hide_labels=False,  # hide labels
+        hide_conf=False,  # hide confidences
+        hide_class=False,  # hide IDs
+        half=False,  # use FP16 half-precision inference
+        dnn=False,  # use OpenCV DNN for ONNX inference
+        eval=False,  # run multi-gpu eval
+):
+
+    source = str(source)
+    save_img = not nosave and not source.endswith('.txt')  # save inference images
+    is_file = Path(source).suffix[1:] in (VID_FORMATS)
+    is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
+    webcam = source.isnumeric() or source.endswith('.txt') or (is_url and not is_file)
+    if is_url and is_file:
+        source = check_file(source)  # download
+
+    # Directories
+    if not isinstance(yolo_weights, list):  # single yolo model
+        exp_name = yolo_weights.stem
+    elif type(yolo_weights) is list and len(yolo_weights) == 1:  # single models after --yolo_weights
+        exp_name = Path(yolo_weights[0]).stem
+    else:  # multiple models after --yolo_weights
+        exp_name = 'ensemble'
+    exp_name = name if name else exp_name + "_" + strong_sort_weights.stem
+    save_dir = increment_path(Path(project) / exp_name, exist_ok=exist_ok)  # increment run
+    (save_dir / 'tracks' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+
+    # Load model
+    if eval:
+        device = torch.device(int(device))
     else:
-        files = [args.path]
-    files.sort()
-    tracker = SORT(args.max_age, args.min_hists, args.iou_threshold)
-    timer = Timer()
-    results = []
+        device = select_device(device)
+    model = DetectMultiBackend(yolo_weights, device=device, dnn=dnn, data=None, fp16=half)
+    stride, names, pt = model.stride, model.names, model.pt
+    imgsz = check_img_size(imgsz, s=stride)  # check image size
 
-    for frame_id, img_path in enumerate(files, 1):
-        outputs, img_info = predictor.inference(img_path, timer)
-        if outputs[0] is not None:
-            online_targets = tracker.update(outputs[0])
-            online_tlwhs = []
-            online_ids = []
-            for t in online_targets:
-                tlwh = [t[0], t[1], t[2] - t[0], t[3] - t[1]]
-                tid = t[4]
-                vertical = tlwh[2] / tlwh[3] > args.aspect_ratio_thresh
-                if tlwh[2] * tlwh[3] > args.min_box_area and not vertical:
-                    online_tlwhs.append(tlwh)
-                    online_ids.append(tid)
-                    results.append(
-                        f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
-                    )
-            timer.toc()
-            online_im = plot_tracking(
-                img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id, fps=1. / timer.average_time
-            )
-        else:
-            timer.toc()
-            online_im = img_info['raw_img']
-
-        # result_image = predictor.visual(outputs[0], img_info, predictor.confthre)
-        if args.save_result:
-            timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-            save_folder = os.path.join(vis_folder, timestamp)
-            os.makedirs(save_folder, exist_ok=True)
-            cv2.imwrite(os.path.join(save_folder, os.path.basename(img_path)), online_im)
-
-        if frame_id % 20 == 0:
-            logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
-
-        ch = cv2.waitKey(0)
-        if ch == 27 or ch == ord("q") or ch == ord("Q"):
-            break
-
-    if args.save_result:
-        res_file = os.path.join(vis_folder, f"{timestamp}.txt")
-        with open(res_file, 'w') as f:
-            f.writelines(results)
-        logger.info(f"save results to {res_file}")
-
-
-def imageflow_demo(predictor, vis_folder, current_time, args):
-    cap = cv2.VideoCapture(args.path if args.demo_type == "video" else args.camid)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    timestamp = time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-    save_folder = os.path.join(vis_folder, timestamp)
-    os.makedirs(save_folder, exist_ok=True)
-    if args.demo_type == "video":
-        save_path = args.out_path
+    # Dataloader
+    if webcam:
+        show_vid = check_imshow()
+        cudnn.benchmark = True  # set True to speed up constant image size inference
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
+        nr_sources = len(dataset)
     else:
-        save_path = os.path.join(save_folder, "camera.mp4")
-    logger.info(f"video save_path is {save_path}")
-    vid_writer = cv2.VideoWriter(
-        save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
-    )
-    tracker = SORT(args.max_age, args.min_hists, args.iou_threshold)
-    timer = Timer()
-    frame_id = 0
-    results = []
-    while True:
-        if frame_id % 20 == 0:
-            logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
-        ret_val, frame = cap.read()
-        if ret_val:
-            outputs, img_info = predictor.inference(frame, timer)
-            if outputs[0] is not None:
-                online_targets = tracker.update(outputs[0])
-                online_tlwhs = []
-                online_ids = []
-                for t in online_targets:
-                    tlwh = [t[0], t[1], t[2] - t[0], t[3] - t[1]]
-                    tid = t[4]
-                    vertical = tlwh[2] / tlwh[3] > args.aspect_ratio_thresh
-                    if tlwh[2] * tlwh[3] > args.min_box_area and not vertical:
-                        online_tlwhs.append(tlwh)
-                        online_ids.append(tid)
-                        results.append(
-                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},1.0,-1,-1,-1\n"
-                        )
-                timer.toc()
-                online_im = plot_tracking(
-                    img_info['raw_img'], online_tlwhs, online_ids, frame_id=frame_id + 1, fps=1. / timer.average_time
-                )
+        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
+        nr_sources = 1
+    vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
+
+    # Create as many strong sort instances as there are video sources
+    sort_tracker = SORT()
+    outputs = [None] * nr_sources
+
+    # Run tracking
+    model.warmup(imgsz=(1 if pt else nr_sources, 3, *imgsz))  # warmup
+    dt, seen = [0.0, 0.0, 0.0, 0.0], 0
+    curr_frames, prev_frames = [None] * nr_sources, [None] * nr_sources
+    for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
+        t1 = time_sync()
+        im = torch.from_numpy(im).to(device)
+        im = im.half() if half else im.float()  # uint8 to fp16/32
+        im /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if len(im.shape) == 3:
+            im = im[None]  # expand for batch dim
+        t2 = time_sync()
+        dt[0] += t2 - t1
+
+        # Inference
+        visualize = increment_path(save_dir / Path(path[0]).stem, mkdir=True) if visualize else False
+        pred = model(im, augment=augment, visualize=visualize)
+        t3 = time_sync()
+        dt[1] += t3 - t2
+
+        # Apply NMS
+        pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        dt[2] += time_sync() - t3
+
+        # Process detections
+        for i, det in enumerate(pred):  # detections per image
+            seen += 1
+            if webcam:  # nr_sources >= 1
+                p, im0, _ = path[i], im0s[i].copy(), dataset.count
+                p = Path(p)  # to Path
+                s += f'{i}: '
+                txt_file_name = p.name
+                save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
             else:
-                timer.toc()
-                online_im = img_info['raw_img']
-            if args.save_result:
-                vid_writer.write(online_im)
-            ch = cv2.waitKey(1)
-            if ch == 27 or ch == ord("q") or ch == ord("Q"):
-                break
-        else:
-            break
-        frame_id += 1
+                p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
+                p = Path(p)  # to Path
+                # video file
+                if source.endswith(VID_FORMATS):
+                    txt_file_name = p.stem
+                    save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+                # folder with imgs
+                else:
+                    txt_file_name = p.parent.name  # get folder name containing current img
+                    save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+            curr_frames[i] = im0
 
-    if args.save_result:
-        res_file = os.path.join(vis_folder, f"{timestamp}.txt")
-        with open(res_file, 'w') as f:
-            f.writelines(results)
-        logger.info(f"save results to {res_file}")
+            txt_path = str(save_dir / 'tracks' / txt_file_name)  # im.txt
+            s += '%gx%g ' % im.shape[2:]  # print string
+            imc = im0.copy() if save_crop else im0  # for save_crop
 
-def make_parser():
-    parser = argparse.ArgumentParser("SORT_yolov5 parameters")
-    # parser.add_argument('--display', dest='display', help='Display online tracker output (slow) [False]',action='store_true')
-    # parser.add_argument("--seq_path", help="Path to detections.", type=str, default='data')
-    # parser.add_argument("--phase", help="Subdirectory in seq_path.", type=str, default='train')
-    parser.add_argument("--model_path", 
-                        help="directory to checlpoint or model")
-    parser.add_argument("--demo_type", 
-                        help="choose type of demonstration, video or image",
-                        default="video",type=str)
-    parser.add_argument("--output_dir", type=str, default="evaldata/trackers/mot_challenge")
-    parser.add_argument( "--path", default="./videos/demo.mp4", help="path to images or video")
+            annotator = Annotator(im0, line_width=2, pil=not ascii)
 
-    # Track args
-    parser.add_argument("--max_age", 
-                        help="Maximum number of frames to keep alive a track without associated detections.", 
-                        type=int, default=1)
-    parser.add_argument("--min_hits", 
-                        help="Minimum number of associated detections before track is initialised.", 
-                        type=int, default=3)
-    parser.add_argument("--iou_threshold", help="Minimum IOU for match.", type=float, default=0.3)
+            if det is not None and len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
-    parser.add_argument(
-        "--device",
-        default="gpu",
-        type=str,
-        help="device to run our model, can either be cpu or gpu",
-    )
-    return parser
+                xywhs = xyxy2xywh(det[:, 0:4])
+                confs = det[:, 4]
+                clss = det[:, 5]
+
+                # pass detections to strongsort
+                t4 = time_sync()
+                outputs[i] = sort_tracker.update(det.cpu())
+     
+                t5 = time_sync()
+                dt[3] += t5 - t4
+
+                # draw boxes for visualization
+                if len(outputs[i]) > 0:
+                    for j, (output, conf) in enumerate(zip(outputs[i], confs)):
+                        bboxes = output[0:4]
+                        id = output[4]
+                        # cls = output[5]
+                        cls = 0
+
+                        if save_txt:
+                            # to MOT format
+                            bbox_left = output[0]
+                            bbox_top = output[1]
+                            bbox_w = output[2] - output[0]
+                            bbox_h = output[3] - output[1]
+                            # Write MOT compliant results to file
+                            with open(txt_path + '.txt', 'a') as f:
+                                f.write(('%g ' * 10 + '\n') % (frame_idx + 1, id, bbox_left,  # MOT format
+                                                               bbox_top, bbox_w, bbox_h, -1, -1, -1, i))
+
+                        if save_vid or save_crop or show_vid:  # Add bbox to image
+                            c = int(cls)  # integer class
+                            id = int(id)  # integer id
+                            label = None if hide_labels else (f'{id} {names[c]}' if hide_conf else \
+                                (f'{id} {conf:.2f}' if hide_class else f'{id} {names[c]} {conf:.2f}'))
+                            annotator.box_label(bboxes, label, color=colors(c, True))
+                            if save_crop:
+                                txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
+                                save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)
+                # print(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
+                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
+
+            else:
+                # sort_list[i].increment_ages()
+                LOGGER.info('No detections')
+
+            # Stream results
+            im0 = annotator.result()
+            if show_vid:
+                cv2.imshow(str(p), im0)
+                cv2.waitKey(1)  # 1 millisecond
+
+            # Save results (image with detections)
+            if save_vid:
+                if vid_path[i] != save_path:  # new video
+                    vid_path[i] = save_path
+                    if isinstance(vid_writer[i], cv2.VideoWriter):
+                        vid_writer[i].release()  # release previous video writer
+                    if vid_cap:  # video
+                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    else:  # stream
+                        fps, w, h = 30, im0.shape[1], im0.shape[0]
+                    save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
+                    vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                vid_writer[i].write(im0)
+
+            prev_frames[i] = curr_frames[i]
+
+    # Print results
+    t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
+    LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS, %.1fms strong sort update per image at shape {(1, 3, *imgsz)}' % t)
+    if save_txt or save_vid:
+        s = f"\n{len(list(save_dir.glob('tracks/*.txt')))} tracks saved to {save_dir / 'tracks'}" if save_txt else ''
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
+    if update:
+        strip_optimizer(yolo_weights)  # update model (to fix SourceChangeWarning)
 
 
-def main(args):
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
+def parse_opt():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--yolo-weights', nargs='+', type=Path, default=WEIGHTS / 'yolov5m.pt', help='model.pt path(s)')
+    parser.add_argument('--strong-sort-weights', type=Path, default=WEIGHTS / 'osnet_x0_25_msmt17.pt')
+    parser.add_argument('--config-strongsort', type=str, default='strong_sort/configs/strong_sort.yaml')
+    parser.add_argument('--source', type=str, default='0', help='file/dir/URL/glob, 0 for webcam')  
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
+    parser.add_argument('--conf-thres', type=float, default=0.5, help='confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.5, help='NMS IoU threshold')
+    parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--show-vid', action='store_true', help='display tracking video results')
+    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
+    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
+    parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
+    parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
+    parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
+    # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
+    parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
+    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
+    parser.add_argument('--augment', action='store_true', help='augmented inference')
+    parser.add_argument('--visualize', action='store_true', help='visualize features')
+    parser.add_argument('--update', action='store_true', help='update all models')
+    parser.add_argument('--project', default=ROOT / 'runs/track', help='save results to project/name')
+    parser.add_argument('--name', default='exp', help='save results to project/name')
+    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
+    parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
+    parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
+    parser.add_argument('--hide-class', default=False, action='store_true', help='hide IDs')
+    parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
+    parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
+    parser.add_argument('--eval', action='store_true', help='run evaluation')
+    opt = parser.parse_args()
+    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+    print_args(vars(opt))
+    return opt
 
-    if args.save_result:
-        vis_folder = os.path.join(output_dir, "track_vis")
-        os.makedirs(vis_folder, exist_ok=True)
 
-    args.device = torch.device("cuda" if args.device == "gpu" else "cpu")
-
-    logger.info("Args: {}".format(args))
+def main(opt):
+    check_requirements(requirements=ROOT / 'requirements.txt', exclude=('tensorboard', 'thop'))
+    run(**vars(opt))
 
 
-    predictor = PredictorV5(args.model_path, 0.5)
-    current_time = time.localtime()
-    if args.demo_type == "image":
-        image_demo(predictor, vis_folder, current_time, args)
-    elif args.demo_type == "video" or args.demo_type == "webcam":
-        imageflow_demo(predictor, vis_folder, current_time, args)
-
-if __name__ == '__main__':
-    args = make_parser().parse_args()
-    # exp = get_exp(args.exp_file, args.name)
-    main(args)
+if __name__ == "__main__":
+    opt = parse_opt()
+    main(opt)
