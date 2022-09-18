@@ -1,26 +1,22 @@
-import torch
+
+import argparse
+
 import numpy as np
 import cv2
 import time
-import argparse
-
-import sys
-import numpy as np
 from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
 
-import os
 import sys
+import os
 
 __dir__ = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(__dir__)
 sys.path.append(os.path.abspath(os.path.join(__dir__, '..')))
 
-from loguru import logger
 import logging
 from SORT_tracker.sort import SORT
-from SORT_tracker.timer import Timer
 
 from yolov5.utils.dataloaders import VID_FORMATS, LoadImages, LoadStreams
 from yolov5.models.common import DetectMultiBackend
@@ -34,47 +30,6 @@ from tools.visualization import plot_tracking
 from pathlib import Path
 
 
-class PredictorV5(object):
-    def __init__(self, yolo_weight, conf, args):
-        self.yolo_weight = yolo_weight
-        self.model = YoloV5(self.yolo_weight, args.device)
-        self.conf = conf
-        self.args = args
-
-    def inference(self, img, timer, frame_id):
-        img = cv2.resize(img, dsize=(640, 640), interpolation=cv2.INTER_CUBIC)
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-        img = np.ascontiguousarray(img)
-        img = torch.from_numpy(img).to(self.args.device)
-        img = img.float()
-        img /= 255.
-        img_info = {"id": frame_id}
-        if isinstance(img, str):
-            img_info["file_name"] = os.path.basename(img)
-            img = cv2.imread(img)
-        else:
-            img_info["file_name"] = None
-        
-        height, width = img.shape[:2]
-        img_info["height"] = height
-        img_info["width"] = width
-        img_info["raw_img"] = img
-        img_info["ratio"] = .999999
-        #img, ratio = preprocess_v5(img, self.test_size, self.rgb_means, self.std)
-        self.model.conf = self.conf
-        
-        results = self.model(img)
-        timer.tic()
-        predictions = results.pred[0]
-        if len(predictions)==0:
-            return [None], img_info
-        else:
-            boxes = predictions[:, :4].tolist()
-            boxes_int = torch.tensor([[int(v) for v in box] for box in boxes])
-            scores = torch.tensor(predictions[:,4].tolist())
-            outputs = [torch.cat((boxes_int, torch.unsqueeze(scores, dim=1)), 1)]
-            return outputs, img_info, 
-
 # limit the number of cpus used by high performance libraries
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -87,14 +42,6 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # yolov5 sort root directory
 WEIGHTS = ROOT / 'weights'
-
-# if str(ROOT) not in sys.path:
-#     sys.path.append(str(ROOT))  # add ROOT to PATH
-# if str(ROOT / 'yolov5') not in sys.path:
-#     sys.path.append(str(ROOT / 'yolov5'))  # add yolov5 ROOT to PATH
-# if str(ROOT / 'strong_sort') not in sys.path:
-#     sys.path.append(str(ROOT / 'strong_sort'))  # add strong_sort ROOT to PATH
-# ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 
 # remove duplicated stream handler to avoid duplicated logging
@@ -133,7 +80,9 @@ def run(
         dnn=False,  # use OpenCV DNN for ONNX inference
         eval=False,  # run multi-gpu eval
 ):
-
+    speedlines = [[[0, 320], [1920, 320]],
+        [[0, 720], [1920, 720]]]
+    countline = [[0, 520], [1920, 520]]
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (VID_FORMATS)
@@ -174,7 +123,7 @@ def run(
     vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
 
     # Create as many strong sort instances as there are video sources
-    sort_tracker = SORT()
+    sort_tracker = SORT(speedlines=speedlines, countline=countline)
     outputs = [None] * nr_sources
 
     # Run tracking
@@ -241,9 +190,9 @@ def run(
                 confs = det[:, 4]
                 clss = det[:, 5]
 
-                # pass detections to strongsort
+                # pass detections to strongsort 
                 t4 = time_sync()
-                outputs[i] = sort_tracker.update(det.cpu())
+                outputs[i] = sort_tracker.update(frame_idx,det.cpu())
      
                 t5 = time_sync()
                 dt[3] += t5 - t4
@@ -251,11 +200,15 @@ def run(
                 # draw boxes for visualization
                 if len(outputs[i]) > 0:
                     for j, (output, conf) in enumerate(zip(outputs[i], confs)):
-                        bboxes = output[0:4]
-                        id = output[4]
+                        # bboxes = output[0:4]
+                        # conf = output[4]
                         # cls = output[5]
-                        cls = 0
-
+                        # id = output[6]
+                        bboxes = output.bbox
+                        conf = output.conf
+                        cls = output.class_id
+                        id = output.track_id
+                        speed = output.speed
                         if save_txt:
                             # to MOT format
                             bbox_left = output[0]
@@ -268,15 +221,23 @@ def run(
                                                                bbox_top, bbox_w, bbox_h, -1, -1, -1, i))
 
                         if save_vid or save_crop or show_vid:  # Add bbox to image
+                            
+                            left_point, right_point = countline[0], countline[1]
+                            cv2.line(im0, left_point, right_point, (8, 8, 136), 3)
+                            for line in speedlines:
+                                left_point, right_point = line[0], line[1]
+                                cv2.line(im0, left_point, right_point, (136, 8, 8), 3)
                             c = int(cls)  # integer class
                             id = int(id)  # integer id
                             label = None if hide_labels else (f'{id} {names[c]}' if hide_conf else \
-                                (f'{id} {conf:.2f}' if hide_class else f'{id} {names[c]} {conf:.2f}'))
+                                (f'{id} {conf:.2f}' if hide_class else \
+                                (f'{id} {names[c]} {speed:.2f} km/h' if speed > 0 else \
+                                (f'{id} {names[c]} {conf:.2f}'))))
                             annotator.box_label(bboxes, label, color=colors(c, True))
                             if save_crop:
                                 txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
                                 save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)
-                # print(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
+                print(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
                 LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
 
             else:
@@ -285,6 +246,8 @@ def run(
 
             # Stream results
             im0 = annotator.result()
+            cv2.putText(im0, "CAR COUNT : "+str(sort_tracker.cars), (60, 700), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            cv2.putText(im0, "MOTORBIKE COUNT : "+str(sort_tracker.motors), (60, 750), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
             if show_vid:
                 cv2.imshow(str(p), im0)
                 cv2.waitKey(1)  # 1 millisecond
