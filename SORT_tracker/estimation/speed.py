@@ -15,6 +15,8 @@ class TWOLINEs(object):
             # speed = d_meters * self.fps * 3.6
             time_travel = (frame_idx - obj.start_t) / self.fps
             distance = 30
+            if time_travel == 0:
+                return 0
             speed = (distance / time_travel) * 3.6
             return speed
         return 0

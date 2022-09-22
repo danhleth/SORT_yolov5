@@ -3,7 +3,7 @@ import argparse
 
 import numpy as np
 import cv2
-import time
+
 from pathlib import Path
 import torch
 import torch.backends.cudnn as cudnn
@@ -18,7 +18,6 @@ sys.path.append(os.path.abspath(os.path.join(__dir__, '..')))
 import logging
 from SORT_tracker.sort import SORT
 
-from yolov5.utils.dataloaders import VID_FORMATS, LoadImages, LoadStreams
 from yolov5.models.common import DetectMultiBackend
 from yolov5.utils.dataloaders import VID_FORMATS, LoadImages, LoadStreams
 from yolov5.utils.general import (LOGGER, check_img_size, non_max_suppression, scale_coords, check_requirements, cv2,
@@ -79,6 +78,7 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         eval=False,  # run multi-gpu eval
+        is_download = False
 ):
     speedlines = [[[0, 320], [1920, 320]],
         [[0, 720], [1920, 720]]]
@@ -88,7 +88,7 @@ def run(
     is_file = Path(source).suffix[1:] in (VID_FORMATS)
     is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
     webcam = source.isnumeric() or source.endswith('.txt') or (is_url and not is_file)
-    if is_url and is_file:
+    if is_url and is_file and is_download:
         source = check_file(source)  # download
 
     # Directories
@@ -246,6 +246,7 @@ def run(
 
             # Stream results
             im0 = annotator.result()
+            cv2.putText(im0, str(frame_idx), (60, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (8, 150, 8),3)
             cv2.putText(im0, "CAR COUNT : "+str(sort_tracker.cars), (60, 700), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
             cv2.putText(im0, "MOTORBIKE COUNT : "+str(sort_tracker.motors), (60, 750), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
             if show_vid:
@@ -297,6 +298,7 @@ def parse_opt():
     parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
     parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
     parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
+    parser.add_argument('--is_download', default=False, action='store_true', help='download stream video')
     # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
