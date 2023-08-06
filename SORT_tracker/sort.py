@@ -194,11 +194,40 @@ class SORT(object):
     self.iou_threshold = iou_threshold
     self.trackers = []
     self.frame_count = 0
-    self.model_estimation = TWOLINEs(9,speedlines=speedlines)
+    # self.model_estimation = TWOLINEs(9,speedlines=speedlines)
     
     self.cars = 0
     self.motors = 0
     self.countline = countline
+
+    ###
+    # ['container', 'empty container', 'bicycle', 'car', 'motorcycle', 'suv', 'truck', 'other', 'bus', 'motorbike', 'containerbox']
+    #
+    self.class_names = {"0": "container",
+                        "1": "empty container",
+                        "2": "bicycle",
+                        "3": "car",
+                        "4": "motorcycle",
+                        "5": "suv",
+                        "6": "truck",
+                        "7": "other",
+                        "8": "bus",
+                        "9": "motorbike",
+                        "10": "containerbox"}
+    self.counter = {
+                    "container": 0,
+                    "empty container": 0,
+                    "bicycle": 0,
+                    "car": 0,
+                    "motorcycle": 0,
+                    "suv": 0,
+                    "truck": 0,
+                    "other": 0,
+                    "bus": 0,
+                    "motorbike": 0,
+                    "containerbox": 0
+                    }
+        
 
   def update(self, frame_idx, dets=np.empty((0, 6))):
     """
@@ -215,7 +244,8 @@ class SORT(object):
     ret = []
     for t, trk in enumerate(trks):
       pos = self.trackers[t].predict()[0]
-      trk[:] = [pos[0], pos[1], pos[2], pos[3], 0]
+      # print(pos[0], pos[1], pos[2], pos[3])
+      trk[:] = np.array([pos[0][0], pos[1][0], pos[2][0], pos[3][0], 0])
       if np.any(pd.isna(pos)):
         to_del.append(t)
     trks = np.ma.compress_rows(np.ma.masked_invalid(trks))
@@ -246,19 +276,22 @@ class SORT(object):
         if doIntersect(self.countline[0], self.countline[1], nline[0], nline[1]):
           if not trk.counted:
               trk.counted = True
-              if trk.class_id == 3:
-                self.cars += 1
-              if trk.class_id == 4:
-                self.motors += 1
+              try:
+                  track_class_id = trk.class_id.astype(int)
+              except:
+                  track_class_id = trk.class_id.item()
+          
+              track_class_name = self.class_names[str(int(track_class_id))]    
+              self.counter[track_class_name] += 1  
 
-        for line in self.model_estimation.speedlines:
-          if doIntersect(line[0], line[1], nline[0], nline[1]):
-            if line not in trk.cached_lines:
-              trk.cached_lines.append(line)
-              if len(trk.cached_lines) > 1:
-                trk.speed = self.model_estimation.estimate_speed(trk, frame_idx, self._tlwh_to_xywh([x1, y1, x2, y2]))
-              trk.start_t = frame_idx
-              trk.start_pos = self._tlwh_to_xywh([x1,y1,x2,y2])
+        # for line in self.model_estimation.speedlines:
+        #   if doIntersect(line[0], line[1], nline[0], nline[1]):
+        #     if line not in trk.cached_lines:
+        #       trk.cached_lines.append(line)
+        #       if len(trk.cached_lines) > 1:
+        #         trk.speed = self.model_estimation.estimate_speed(trk, frame_idx, self._tlwh_to_xywh([x1, y1, x2, y2]))
+        #       trk.start_t = frame_idx
+        #       trk.start_pos = self._tlwh_to_xywh([x1,y1,x2,y2])
               
       trk.cached_pos = [xmean, ymean]
       if (trk.time_since_update < 1) and (trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits):

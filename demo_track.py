@@ -11,9 +11,17 @@ import torch.backends.cudnn as cudnn
 import sys
 import os
 
-__dir__ = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(__dir__)
-sys.path.append(os.path.abspath(os.path.join(__dir__, '..')))
+FILE = Path(__file__).resolve()
+ROOT = FILE.parents[0]  # yolov5 strongsort root directory
+WEIGHTS = ROOT / 'weights'
+
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))  # add ROOT to PATH
+if str(ROOT / 'yolov5') not in sys.path:
+    sys.path.append(str(ROOT / 'yolov5'))  # add yolov5 ROOT to PATH
+if str(ROOT / 'SORT_tracker') not in sys.path:
+    sys.path.append(str(ROOT / 'SORT_tracker'))  # add strong_sort ROOT to PATH
+ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 import logging
 from SORT_tracker.sort import SORT
@@ -72,6 +80,7 @@ def run(
         name='exp',  # save results to project/name
         exist_ok=False,  # existing project/name ok, do not increment
         line_thickness=3,  # bounding box thickness (pixels)
+        hide_id = False,  # hide track IDs
         hide_labels=False,  # hide labels
         hide_conf=False,  # hide confidences
         hide_class=False,  # hide IDs
@@ -82,7 +91,7 @@ def run(
 ):
     speedlines = [[[0, 320], [1920, 320]],
         [[0, 720], [1920, 720]]]
-    countline = [[0, 520], [1920, 520]]
+    countline = [[800, 680], [1280, 680]]
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (VID_FORMATS)
@@ -110,7 +119,7 @@ def run(
     model = DetectMultiBackend(yolo_weights, device=device, dnn=dnn, data=None, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
-
+  
     # Dataloader
     if webcam:
         show_vid = check_imshow()
@@ -192,6 +201,7 @@ def run(
 
                 # pass detections to strongsort 
                 t4 = time_sync()
+                
                 outputs[i] = sort_tracker.update(frame_idx,det.cpu())
      
                 t5 = time_sync()
@@ -224,21 +234,22 @@ def run(
                             
                             left_point, right_point = countline[0], countline[1]
                             cv2.line(im0, left_point, right_point, (8, 8, 136), 3)
-                            for line in speedlines:
-                                left_point, right_point = line[0], line[1]
-                                cv2.line(im0, left_point, right_point, (136, 8, 8), 3)
+                            # for line in speedlines:
+                            #     left_point, right_point = line[0], line[1]
+                            #     cv2.line(im0, left_point, right_point, (136, 8, 8), 3)
                             c = int(cls)  # integer class
                             id = int(id)  # integer id
-                            label = None if hide_labels else (f'{id} {names[c]}' if hide_conf else \
+                            label = None if hide_labels else (f'{names[c]}' if hide_id else f'{id} {names[c]}' if hide_conf else \
                                 (f'{id} {conf:.2f}' if hide_class else \
                                 (f'{id} {names[c]} {speed:.2f} km/h' if speed > 0 else \
                                 (f'{id} {names[c]} {conf:.2f}'))))
                             annotator.box_label(bboxes, label, color=colors(c, True))
                             if save_crop:
                                 txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
+                                bboxes = np.array([bboxes[0][0], bboxes[1][0], bboxes[2][0], bboxes[3][0]], dtype=np.float32)
                                 save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)
-                print(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
-                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), StrongSORT:({t5 - t4:.3f}s)')
+                print(f'{s}Done. YOLO:({t3 - t2:.3f}s), SORT:({t5 - t4:.3f}s)')
+                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), SORT:({t5 - t4:.3f}s)')
 
             else:
                 # sort_list[i].increment_ages()
@@ -246,12 +257,23 @@ def run(
 
             # Stream results
             im0 = annotator.result()
-            cv2.putText(im0, str(frame_idx), (60, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (8, 150, 8),3)
-            cv2.putText(im0, "CAR COUNT : "+str(sort_tracker.cars), (60, 700), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
-            cv2.putText(im0, "MOTORBIKE COUNT : "+str(sort_tracker.motors), (60, 750), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            # cv2.putText(im0, str(frame_idx), (60, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (8, 150, 8),3)
+            # cv2.putText(im0, "CAR COUNT : "+str(sort_tracker.cars), (60, 700), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            # cv2.putText(im0, "MOTORBIKE COUNT : "+str(sort_tracker.motors), (60, 750), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            # print(names)
+            # for k, name in names.items():
+            #    cv2.putText(im0, f"{name.upper()} COUNT : "+str(sort_tracker.counter[name]), (60, 70*int(k+1)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            cv2.putText(im0, f"CAR COUNT : "+str(sort_tracker.counter["car"]), (60, 70*int(1)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            cv2.putText(im0, f"TRUCK COUNT : "+str(sort_tracker.counter["truck"]), (60, 70*int(2)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            cv2.putText(im0, f"BUS COUNT : "+str(sort_tracker.counter["bus"]), (60, 70*int(3)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            cv2.putText(im0, f"CONTAINER COUNT : "+str(sort_tracker.counter["container"]), (60, 70*int(4)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255),3)
+            
             if show_vid:
                 cv2.imshow(str(p), im0)
                 cv2.waitKey(1)  # 1 millisecond
+            
+            if save_img:
+                cv2.imwrite(save_path, im0)
 
             # Save results (image with detections)
             if save_vid:
@@ -309,6 +331,7 @@ def parse_opt():
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
+    parser.add_argument('--hide-id', default=False, action='store_true', help='hide track ids')
     parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
     parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
     parser.add_argument('--hide-class', default=False, action='store_true', help='hide IDs')
